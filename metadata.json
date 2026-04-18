@@ -1,0 +1,6 @@
+{
+  "name": "Nepali Finance Extractor",
+  "description": "Extracts and classifies financial data from handwritten Nepali images and stores them in Google Sheets.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": []
+}
