@@ -176,12 +176,16 @@ async function startServer() {
 // Export for Vercel
 export default app;
 
-// Start server locally
+// Start server locally or in non-serverless production (like Cloud Run)
 if (process.env.NODE_ENV !== 'production') {
   startServer();
-} else if (process.env.PORT) {
-    // Basic listen for other production environments (like Cloud Run)
+} else {
+  // Check if we are in a serverless environment like Vercel
+  const isVercel = !!process.env.VERCEL;
+  
+  if (!isVercel && process.env.PORT) {
     app.listen(PORT, '0.0.0.0', () => {
-        console.log(`Production server running on port ${PORT}`);
+      console.log(`Production server running on port ${PORT}`);
     });
+  }
 }

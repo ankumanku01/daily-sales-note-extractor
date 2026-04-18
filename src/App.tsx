@@ -347,7 +347,10 @@ export default function App() {
                     {isProcessing ? (
                       <>
                         <RefreshCcw size={18} className="animate-spin" />
-                        Analyzing Text...
+                        <div className="flex flex-col items-start leading-tight">
+                          <span className="text-sm">Analyzing Text...</span>
+                          <span className="text-[10px] opacity-80 font-normal italic">Can take 15-30s</span>
+                        </div>
                       </>
                     ) : (
                       <>

@@ -60,29 +60,17 @@ const ai = new GoogleGenAI({
 
 export async function processHandwrittenImage(base64Image: string, mimeType: string = "image/jpeg"): Promise<ExtractionResult> {
   const prompt = `
-    You are an expert financial auditor reading a handwritten ledger. 
-    The file provided might be a single page (image) or multiple pages (PDF).
+    Analyze this handwritten ledger and output JSON.
+    Format your response as a JSON object with: 
+    - date: (YYYY-MM-DD, assume year 2026)
+    - entry_type: "sales", "ev_sessions", or "expenses"
+    - total_amount: numeric total
+    - entries: list of extracted items with payment_mode ("Fonepay" if "P.P", else "Cash")
+    - summary_reasoning: brief explanation
+    - raw_text: transcription
     
-    FOR EACH PAGE IN THE DOCUMENT:
-    1. Identify the Date at the top left (e.g., "7 Apr"). Force year to 2026 (YYYY-MM-DD).
-    2. Extract three distinct sections:
-
-    SECTION 1: EV CHARGING LOG (Handwritten lines starting with Serial Numbers)
-    - Pattern: [S.N] [Starting %] - [Ending %] (x [Rate])
-    - EXTRACT AND POPULATE: start_percent, end_percent, per_percent_rate, total_amount (calculated), per_unit_rate.
-    - CRITICAL: NO ZEROS for these fields if present in text.
-
-    SECTION 2: SALES / ORDERS (Middle section)
-    - Extract: item_name, quantity (Sum of numbers), total_amount.
-
-    SECTION 3: DAILY EXPENSES (Bottom section starting with "Exp")
-    - Extract: description, amount, payment_mode.
-
-    CRITICAL REQUIREMENTS:
-    - If this is a multi-page PDF, return a list of extracted pages in the 'pages' array.
-    - JSON CONSISTENCY: Every entry must match the schema exactly.
-    - "P.P" = "Fonepay", default is "Cash".
-    - Convert Nepali numerals to English.
+    If multiple pages, use a "pages" array with similar structure.
+    Sections to find: SN starting lines (EV), middle items (Sales), bottom "Exp" lines (Expenses).
   `;
 
   const response = await ai.models.generateContent({
