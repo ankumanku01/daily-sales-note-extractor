@@ -29,7 +29,7 @@ async function startServer() {
 
   app.post('/api/save-to-sheets', async (req, res) => {
     try {
-      const { entry_type, date, entries, total_amount, raw_text } = req.body;
+      const { entry_type, date, entries, total_amount, raw_text, file_url } = req.body;
       
       const spreadsheetId = process.env.GOOGLE_SHEETS_ID;
       const serviceAccountKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
@@ -37,8 +37,6 @@ async function startServer() {
 
       // Group entries by type for batch processing
       const groupedEntries = entries.reduce((acc: any, entry: any) => {
-        // AI is now strictly instructed to include entry_type per item
-        // Fallback to top-level entry_type if missing
         const type = entry.entry_type || entry_type || 'expenses'; 
         if (!acc[type]) acc[type] = [];
         acc[type].push(entry);
@@ -47,18 +45,16 @@ async function startServer() {
 
       // Method 1: Google Apps Script
       if (appsScriptUrl) {
-        // To be safe for Apps Script, we'll send the raw payload but also include grouped info 
-        // if the Apps Script isn't smart enough to group it itself.
-        // However, a single POST is better. Let's send the full payload.
         const response = await fetch(appsScriptUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            entry_type, // Dominant type
+            entry_type, 
             date,
-            entries,    // Full list for the script to iterate
+            entries,
             total_amount,
-            rawText: raw_text
+            rawText: raw_text,
+            file_url
           })
         });
         
@@ -68,7 +64,7 @@ async function startServer() {
 
       // Method 2: Service Account
       if (!spreadsheetId || !serviceAccountKey) {
-        return res.status(400).json({ error: 'Google Sheets configuration missing (Apps Script URL or Service Account)' });
+        return res.status(400).json({ error: 'Google Sheets configuration missing' });
       }
 
       const auth = new GoogleAuth({
@@ -83,19 +79,20 @@ async function startServer() {
         let rowValues = [];
 
         if (type === 'sales') {
-          targetRange = 'Sales!A:F';
-          // Format: item_name, quantity, rate, total, payment_mode, order_date
+          targetRange = 'Sales!A:G';
+          // Format: item_name, quantity, rate, total, payment_mode, order_date, file_url
           rowValues = (typeEntries as any).map((e: any) => [
             e.item_name || '', 
             e.quantity || 0, 
             e.rate || 0, 
             e.total || e.amount || e.total_amount || 0, 
             e.payment_mode || 'Cash', 
-            date
+            date,
+            file_url || ''
           ]);
         } else if (type === 'ev_sessions') {
-          targetRange = 'EVSessions!A:I';
-          // Format: total_amount, payment_mode, category, start_percent, end_percent, kcal, per_unit_rate, per_percent_rate, session_date
+          targetRange = 'EVSessions!A:J';
+          // Format: total_amount, payment_mode, category, start_percent, end_percent, kcal, per_unit_rate, per_percent_rate, session_date, file_url
           rowValues = (typeEntries as any).map((e: any) => [
             e.total_amount || e.amount || e.total || 0, 
             e.payment_mode || 'Cash', 
@@ -105,18 +102,20 @@ async function startServer() {
             e.kcal || 0, 
             e.per_unit_rate || 0, 
             e.per_percent_rate || 0, 
-            date
+            date,
+            file_url || ''
           ]);
         } else if (type === 'expenses') {
-          targetRange = 'Expenses!A:F';
-          // Format: description, amount, category, payment_mode, remarks, expense_date
+          targetRange = 'Expenses!A:G';
+          // Format: description, amount, category, payment_mode, remarks, expense_date, file_url
           rowValues = (typeEntries as any).map((e: any) => [
             e.description || e.item_name || '', 
             e.amount || e.total || e.total_amount || 0, 
             e.category || '', 
             e.payment_mode || 'Cash', 
             e.remarks || '', 
-            date
+            date,
+            file_url || ''
           ]);
         }
 
@@ -138,9 +137,9 @@ async function startServer() {
       try {
         await sheets.spreadsheets.values.append({
           spreadsheetId,
-          range: 'RawData!A:B',
+          range: 'RawData!A:C',
           valueInputOption: 'USER_ENTERED',
-          requestBody: { values: [[date, raw_text]] },
+          requestBody: { values: [[date, raw_text, file_url]] },
         });
       } catch (e) {}
 

@@ -18,14 +18,21 @@ import { motion, AnimatePresence } from 'motion/react';
 import confetti from 'canvas-confetti';
 import { processHandwrittenImage, type ExtractionResult } from './lib/gemini';
 import { cn } from './lib/utils';
+import { supabase, STORAGE_BUCKET, type EVSessionModel, type SalesRecordModel, type ExpenseRecordModel, type ExtractionLogModel } from './lib/supabase';
+import * as pdfjsLib from 'pdfjs-dist';
+
+// pdfjs worker setup
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
 export default function App() {
-  const [image, setImage] = useState<string | null>(null);
+  const [file, setFile] = useState<{ data: string; type: string; name: string } | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [result, setResult] = useState<ExtractionResult | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [configStatus, setConfigStatus] = useState<{ hasSheetsId: boolean; hasServiceAccount: boolean; hasAppsScript: boolean; hasGeminiKey: boolean } | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<{ success: boolean; url?: string } | null>(null);
 
   React.useEffect(() => {
     fetch('/api/config-status')
@@ -39,33 +46,157 @@ export default function App() {
     if (file) {
       const reader = new FileReader();
       reader.onload = () => {
-        setImage(reader.result as string);
+        setFile({ data: reader.result as string, type: file.type, name: file.name });
         setResult(null);
         setError(null);
+        setUploadStatus(null);
       };
       reader.readAsDataURL(file);
     }
   }, []);
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: { 'image/*': ['.jpeg', '.jpg', '.png'] },
-    multiple: false
-  } as any);
+  const uploadFileToSupabase = async () => {
+    if (!file) return null;
+    
+    // Convert base64 to Blob
+    const base64Data = file.data.split(',')[1];
+    const byteCharacters = atob(base64Data);
+    const byteNumbers = new Array(byteCharacters.length);
+    for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+    }
+    const byteArray = new Uint8Array(byteNumbers);
+    const blob = new Blob([byteArray], { type: file.type });
+
+    const fileName = `${Date.now()}-${file.name}`;
+    const { data, error } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .upload(fileName, blob);
+
+    if (error) {
+      console.error('Upload error:', error);
+      return null;
+    }
+
+    const { data: { publicUrl } } = supabase.storage
+      .from(STORAGE_BUCKET)
+      .getPublicUrl(fileName);
+
+    return publicUrl;
+  };
+
+  const saveToSupabase = async (extraction: ExtractionResult, fileUrl: string | null) => {
+    const evSessions: EVSessionModel[] = [];
+    const salesRecords: SalesRecordModel[] = [];
+    const expenseRecords: ExpenseRecordModel[] = [];
+
+    extraction.entries.forEach(e => {
+      const type = (e as any).entry_type || extraction.entry_type;
+      
+      if (type === 'ev_sessions') {
+        evSessions.push({
+          session_date: extraction.date,
+          start_percent: (e as any).start_percent || 0,
+          end_percent: (e as any).end_percent || 0,
+          per_percent_rate: (e as any).per_percent_rate || 0,
+          per_unit_rate: (e as any).per_unit_rate || 0,
+          total_amount: (e as any).total_amount || 0,
+          payment_mode: e.payment_mode,
+          file_url: fileUrl || undefined
+        });
+      } else if (type === 'sales') {
+        salesRecords.push({
+          order_date: extraction.date,
+          item_name: (e as any).item_name || 'Unknown',
+          quantity: (e as any).quantity || 0,
+          rate: (e as any).rate || 0,
+          total: (e as any).total_amount || (e as any).total || 0,
+          payment_mode: e.payment_mode,
+          file_url: fileUrl || undefined
+        });
+      } else if (type === 'expenses') {
+        expenseRecords.push({
+          expense_date: extraction.date,
+          description: (e as any).description || 'Unknown Expense',
+          amount: (e as any).amount || (e as any).total_amount || 0,
+          category: (e as any).category,
+          payment_mode: e.payment_mode,
+          remarks: (e as any).remarks,
+          file_url: fileUrl || undefined
+        });
+      }
+    });
+
+    try {
+      if (evSessions.length > 0) await supabase.from('ev_sessions').insert(evSessions);
+      if (salesRecords.length > 0) await supabase.from('sales_records').insert(salesRecords);
+      if (expenseRecords.length > 0) await supabase.from('expense_records').insert(expenseRecords);
+      
+      // Log extraction
+      await supabase.from('extraction_logs').insert({
+        file_name: file?.name,
+        raw_text: extraction.raw_text,
+        file_url: fileUrl || undefined
+      });
+    } catch (err) {
+      console.error('Supabase persistence error:', err);
+    }
+  };
 
   const handleProcess = async () => {
-    if (!image) return;
+    if (!file) return;
     setIsProcessing(true);
     setError(null);
     try {
-      const data = await processHandwrittenImage(image);
+      // 1. Upload file to bucket
+      const fileUrl = await uploadFileToSupabase();
+      if (fileUrl) setUploadStatus({ success: true, url: fileUrl });
+
+      // 2. Run Gemini Extraction
+      const data = await processHandwrittenImage(file.data, file.type);
       setResult(data);
+      
+      // 3. Save to Supabase (separate tables)
+      if (data.pages && data.pages.length > 0) {
+        for (const page of data.pages) {
+          await saveToSupabase(page, fileUrl);
+        }
+      } else {
+        await saveToSupabase(data, fileUrl);
+      }
+      
     } catch (err: any) {
       console.error(err);
-      setError('Failed to process image. Please try again.');
+      setError('Failed to process. Please try again.');
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: { 
+      'image/*': ['.jpeg', '.jpg', '.png'],
+      'application/pdf': ['.pdf']
+    },
+    multiple: false
+  } as any);
+
+  const handleUpdateEntry = (pageIndex: number | null, entryIndex: number, field: string, value: any) => {
+    if (!result) return;
+    const newResult = { ...result };
+    
+    if (pageIndex !== null && newResult.pages) {
+      const entries = [...newResult.pages[pageIndex].entries];
+      (entries[entryIndex] as any)[field] = value;
+      newResult.pages[pageIndex].entries = entries;
+    } else {
+      const entries = [...newResult.entries];
+      (entries[entryIndex] as any)[field] = value;
+      newResult.entries = entries;
+    }
+    
+    setResult(newResult);
   };
 
   const handleSaveToSheets = async () => {
@@ -80,7 +211,8 @@ export default function App() {
           date: result.date,
           entries: result.entries,
           total_amount: result.total_amount,
-          raw_text: result.raw_text
+          raw_text: result.raw_text,
+          file_url: uploadStatus?.url
         }),
       });
 
@@ -155,15 +287,22 @@ export default function App() {
                 className={cn(
                   "border-2 border-dashed rounded-xl p-8 transition-all cursor-pointer flex flex-col items-center justify-center text-center gap-3",
                   isDragActive ? "border-orange-500 bg-orange-50" : "border-gray-200 hover:border-gray-300 hover:bg-gray-50",
-                  image ? "py-4" : "py-12"
+                  file ? "py-4" : "py-12"
                 )}
               >
                 <input {...getInputProps()} />
-                {image ? (
+                {file ? (
                   <div className="relative w-full aspect-[3/4] rounded-lg overflow-hidden border border-gray-100">
-                    <img src={image} alt="Preview" className="w-full h-full object-cover" />
+                    {file.type === 'application/pdf' ? (
+                      <div className="w-full h-full flex flex-col items-center justify-center bg-gray-50 text-red-500">
+                        <FileText size={48} />
+                        <p className="text-xs font-bold mt-2 uppercase text-gray-400">PDF Document</p>
+                      </div>
+                    ) : (
+                      <img src={file.data} alt="Preview" className="w-full h-full object-cover" />
+                    )}
                     <div className="absolute inset-0 bg-black/40 opacity-0 hover:opacity-100 transition-opacity flex items-center justify-center">
-                      <p className="text-white text-sm font-medium">Change Image</p>
+                      <p className="text-white text-sm font-medium">Change File</p>
                     </div>
                   </div>
                 ) : (
@@ -172,14 +311,14 @@ export default function App() {
                       <Upload size={24} />
                     </div>
                     <div>
-                      <p className="font-medium">Click or drag image here</p>
-                      <p className="text-xs text-gray-400 mt-1">Supports JPG, PNG (Handwritten Nepali/English)</p>
+                      <p className="font-medium">Click or drag file here</p>
+                      <p className="text-xs text-gray-400 mt-1">Images or PDFs (Handwritten Notes)</p>
                     </div>
                   </>
                 )}
               </div>
 
-              {image && !result && (
+              {file && !result && (
                 <button
                   onClick={handleProcess}
                   disabled={isProcessing}
@@ -251,6 +390,39 @@ export default function App() {
                   animate={{ opacity: 1, scale: 1 }}
                   className="space-y-6"
                 >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h2 className="text-2xl font-bold text-gray-900 tracking-tight">Extraction Result</h2>
+                      <p className="text-gray-500 text-sm mt-1 flex items-center gap-1.5">
+                        <CheckCircle2 size={14} className="text-green-500" />
+                        Processed {result.pages?.length || 1} pages reliably
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      {uploadStatus?.url && (
+                        <a 
+                          href={uploadStatus.url} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium rounded-xl transition-all"
+                        >
+                          <ExternalLink size={16} />
+                          View Original
+                        </a>
+                      )}
+                      <button
+                        onClick={() => setIsEditing(!isEditing)}
+                        className={cn(
+                          "inline-flex items-center gap-2 px-4 py-2 border rounded-xl text-sm font-medium transition-all shadow-sm",
+                          isEditing ? "bg-orange-500 border-orange-500 text-white" : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
+                        )}
+                      >
+                        {isEditing ? <Save size={16} /> : <AlertCircle size={16} />}
+                        {isEditing ? "Finish Editing" : "Edit Entries"}
+                      </button>
+                    </div>
+                  </div>
+
                   {/* Summary Cards */}
                   <div className="grid grid-cols-2 gap-4">
                     <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
@@ -279,124 +451,172 @@ export default function App() {
 
                   {/* Detailed Breakdown */}
                   <div className="space-y-8">
-                    {['sales', 'ev_sessions', 'expenses'].map(type => {
-                      const typeEntries = result.entries.filter(e => (e as any).entry_type === type || (!e.hasOwnProperty('entry_type') && result.entry_type === type));
-                      if (typeEntries.length === 0) return null;
+                    {(result.pages && result.pages.length > 0 ? result.pages : [result]).map((pageResult, pageIdx) => (
+                      <div key={pageIdx} className="space-y-4">
+                        {result.pages && <h2 className="text-lg font-bold text-gray-900 border-l-4 border-orange-500 pl-3">Day {pageIdx + 1}: {pageResult.date}</h2>}
+                        {['sales', 'ev_sessions', 'expenses'].map(type => {
+                          const typeEntries = pageResult.entries.filter(e => (e as any).entry_type === type || (!e.hasOwnProperty('entry_type') && pageResult.entry_type === type));
+                          if (typeEntries.length === 0) return null;
 
-                      return (
-                        <div key={type} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-                          <div className="px-4 sm:px-6 py-4 border-b border-gray-50 flex items-center justify-between bg-gray-50/50">
-                            <h3 className="font-semibold text-sm capitalize">{type.replace('_', ' ')} Records ({result.date})</h3>
-                            <span className="text-[10px] bg-gray-200 px-2 py-0.5 rounded-full font-bold text-gray-500 uppercase">
-                              {typeEntries.length} Entries
-                            </span>
-                          </div>
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-left border-collapse">
-                              <thead>
-                                <tr className="bg-gray-50/50 text-[10px] font-bold text-gray-400 uppercase tracking-widest border-b border-gray-100">
-                                  {type === 'sales' && (
-                                    <>
-                                      <th className="px-6 py-3">Item</th>
-                                      <th className="px-4 py-3 text-right">Qty</th>
-                                      <th className="px-4 py-3 text-right">Rate</th>
-                                      <th className="px-4 py-3 text-right">Total</th>
-                                      <th className="px-4 py-3 text-center">Mode</th>
-                                    </>
-                                  )}
-                                  {type === 'ev_sessions' && (
-                                    <>
-                                      <th className="px-6 py-3">Range (%)</th>
-                                      <th className="px-4 py-3 text-center">Diff</th>
-                                      <th className="px-4 py-3 text-right">Rate</th>
-                                      <th className="px-4 py-3 text-right">Total</th>
-                                      <th className="px-4 py-3 text-center">Mode</th>
-                                    </>
-                                  )}
-                                  {type === 'expenses' && (
-                                    <>
-                                      <th className="px-6 py-3">Description</th>
-                                      <th className="px-4 py-3 text-right">Amount</th>
-                                      <th className="px-4 py-3 text-center">Category</th>
-                                      <th className="px-4 py-3 text-center">Mode</th>
-                                    </>
-                                  )}
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-gray-50 bg-white">
-                                {typeEntries.map((entry: any, idx) => (
-                                  <tr key={idx} className="hover:bg-gray-50/50 transition-colors group">
-                                    {type === 'sales' && (
-                                      <>
-                                        <td className="px-6 py-4 text-sm font-medium text-gray-900">{entry.item_name}</td>
-                                        <td className="px-4 py-4 text-sm font-mono text-right text-gray-600">{entry.quantity || 0}</td>
-                                        <td className="px-4 py-4 text-sm font-mono text-right text-gray-600">{entry.rate || 0}</td>
-                                        <td className="px-4 py-4 text-sm font-semibold font-mono text-right text-blue-600">{(entry.total_amount || entry.total || entry.amount || 0)}</td>
-                                        <td className="px-4 py-4 text-center">
-                                          <span className={cn(
-                                            "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider",
-                                            entry.payment_mode === 'Fonepay' ? "bg-purple-50 text-purple-600" : "bg-gray-100 text-gray-500"
-                                          )}>
-                                            {entry.payment_mode || 'Cash'}
-                                          </span>
-                                        </td>
-                                      </>
-                                    )}
-                                    {type === 'ev_sessions' && (
-                                      <>
-                                        <td className="px-6 py-4 text-sm font-mono text-gray-600">
-                                          <span className="opacity-50">{entry.start_percent || 0}%</span>
-                                          <span className="mx-2 opacity-30">→</span>
-                                          <span className="text-gray-900 font-bold">{entry.end_percent || 0}%</span>
-                                        </td>
-                                        <td className="px-4 py-4 text-sm font-mono text-center text-gray-400">
-                                          {Math.max(0, (entry.end_percent || 0) - (entry.start_percent || 0))}%
-                                        </td>
-                                        <td className="px-4 py-4 text-sm font-mono text-right text-gray-500 whitespace-nowrap">
-                                          x {(entry.per_percent_rate || entry.per_unit_rate || 0)}
-                                        </td>
-                                        <td className="px-4 py-4 text-sm font-semibold font-mono text-right text-blue-600">
-                                          {(entry.total_amount || entry.amount || entry.total || 0)}
-                                        </td>
-                                        <td className="px-4 py-4 text-center">
-                                          <span className={cn(
-                                            "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider",
-                                            entry.payment_mode === 'Fonepay' ? "bg-purple-50 text-purple-600" : "bg-gray-100 text-gray-500"
-                                          )}>
-                                            {entry.payment_mode || 'Cash'}
-                                          </span>
-                                        </td>
-                                      </>
-                                    )}
-                                    {type === 'expenses' && (
-                                      <>
-                                        <td className="px-6 py-4 text-sm font-medium text-gray-900">{entry.description}</td>
-                                        <td className="px-4 py-4 text-sm font-semibold font-mono text-right text-red-600">
-                                          {(entry.amount || entry.total_amount || entry.total || 0)}
-                                        </td>
-                                        <td className="px-4 py-4 text-center">
-                                          <span className="text-[10px] px-2 py-0.5 bg-orange-50 text-orange-600 rounded-full font-bold uppercase tracking-wider">
-                                            {entry.category || 'Utility'}
-                                          </span>
-                                        </td>
-                                        <td className="px-4 py-4 text-center">
-                                          <span className={cn(
-                                            "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider",
-                                            entry.payment_mode === 'Fonepay' ? "bg-purple-50 text-purple-600" : "bg-gray-100 text-gray-500"
-                                          )}>
-                                            {entry.payment_mode || 'Cash'}
-                                          </span>
-                                        </td>
-                                      </>
-                                    )}
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      );
-                    })}
+                          return (
+                            <div key={type} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                              <div className="px-4 sm:px-6 py-4 border-b border-gray-50 flex items-center justify-between bg-gray-50/50">
+                                <h3 className="font-semibold text-sm capitalize">{type.replace('_', ' ')} Records ({pageResult.date})</h3>
+                                <span className="text-[10px] bg-gray-200 px-2 py-0.5 rounded-full font-bold text-gray-500 uppercase">
+                                  {typeEntries.length} Entries
+                                </span>
+                              </div>
+                              <div className="overflow-x-auto">
+                                <table className="w-full text-left border-collapse">
+                                  <thead>
+                                    <tr className="bg-gray-50/50 text-[10px] font-bold text-gray-400 uppercase tracking-widest border-b border-gray-100">
+                                      {type === 'sales' && (
+                                        <>
+                                          <th className="px-6 py-3">Item</th>
+                                          <th className="px-4 py-3 text-right">Qty</th>
+                                          <th className="px-4 py-3 text-right">Rate</th>
+                                          <th className="px-4 py-3 text-right">Total</th>
+                                          <th className="px-4 py-3 text-center">Mode</th>
+                                        </>
+                                      )}
+                                      {type === 'ev_sessions' && (
+                                        <>
+                                          <th className="px-6 py-3">Range (%)</th>
+                                          <th className="px-4 py-3 text-center">Diff</th>
+                                          <th className="px-4 py-3 text-right">Rate</th>
+                                          <th className="px-4 py-3 text-right">Total</th>
+                                          <th className="px-4 py-3 text-center">Mode</th>
+                                        </>
+                                      )}
+                                      {type === 'expenses' && (
+                                        <>
+                                          <th className="px-6 py-3">Description</th>
+                                          <th className="px-4 py-3 text-right">Amount</th>
+                                          <th className="px-4 py-3 text-center">Category</th>
+                                          <th className="px-4 py-3 text-center">Mode</th>
+                                        </>
+                                      )}
+                                      {isEditing && <th className="px-4 py-3 text-center">Edit</th>}
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-gray-50 bg-white">
+                                    {typeEntries.map((originalEntry: any, originalIdx) => {
+                                      // Find correct index in global list if single page, or page list
+                                      const entry = originalEntry;
+                                      const idx = pageResult.entries.indexOf(originalEntry);
+                                      const pIdx = result.pages ? pageIdx : null;
+
+                                      return (
+                                        <tr key={idx} className="hover:bg-gray-50/50 transition-colors group">
+                                          {type === 'sales' && (
+                                            <>
+                                              <td className="px-6 py-4 text-sm font-medium text-gray-900">
+                                                {isEditing ? (
+                                                  <input 
+                                                    type="text" 
+                                                    className="w-full border rounded px-1" 
+                                                    value={entry.item_name} 
+                                                    onChange={(e) => handleUpdateEntry(pIdx, idx, 'item_name', e.target.value)}
+                                                  />
+                                                ) : entry.item_name}
+                                              </td>
+                                              <td className="px-4 py-4 text-sm font-mono text-right text-gray-600">
+                                                {isEditing ? (
+                                                  <input 
+                                                    type="number" 
+                                                    className="w-16 border rounded px-1 text-right" 
+                                                    value={entry.quantity} 
+                                                    onChange={(e) => handleUpdateEntry(pIdx, idx, 'quantity', Number(e.target.value))}
+                                                  />
+                                                ) : (entry.quantity || 0)}
+                                              </td>
+                                              <td className="px-4 py-4 text-sm font-mono text-right text-gray-600">{entry.rate || 0}</td>
+                                              <td className="px-4 py-4 text-sm font-semibold font-mono text-right text-blue-600">{(entry.total_amount || entry.total || entry.amount || 0)}</td>
+                                              <td className="px-4 py-4 text-center">
+                                                <span className={cn(
+                                                  "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider",
+                                                  entry.payment_mode === 'Fonepay' ? "bg-purple-50 text-purple-600" : "bg-gray-100 text-gray-500"
+                                                )}>
+                                                  {entry.payment_mode || 'Cash'}
+                                                </span>
+                                              </td>
+                                            </>
+                                          )}
+                                          {type === 'ev_sessions' && (
+                                            <>
+                                              <td className="px-6 py-4 text-sm font-mono text-gray-600">
+                                                {isEditing ? (
+                                                  <div className="flex items-center gap-1">
+                                                    <input type="number" className="w-12 border rounded px-1" value={entry.start_percent} onChange={(e) => handleUpdateEntry(pIdx, idx, 'start_percent', Number(e.target.value))} />
+                                                    <span>→</span>
+                                                    <input type="number" className="w-12 border rounded px-1" value={entry.end_percent} onChange={(e) => handleUpdateEntry(pIdx, idx, 'end_percent', Number(e.target.value))} />
+                                                  </div>
+                                                ) : (
+                                                  <>
+                                                    <span className="opacity-50">{entry.start_percent || 0}%</span>
+                                                    <span className="mx-2 opacity-30">→</span>
+                                                    <span className="text-gray-900 font-bold">{entry.end_percent || 0}%</span>
+                                                  </>
+                                                )}
+                                              </td>
+                                              <td className="px-4 py-4 text-sm font-mono text-center text-gray-400">
+                                                {Math.max(0, (entry.end_percent || 0) - (entry.start_percent || 0))}%
+                                              </td>
+                                              <td className="px-4 py-4 text-sm font-mono text-right text-gray-500 whitespace-nowrap">
+                                                x {(entry.per_percent_rate || entry.per_unit_rate || 0)}
+                                              </td>
+                                              <td className="px-4 py-4 text-sm font-semibold font-mono text-right text-blue-600">
+                                                {(entry.total_amount || entry.amount || entry.total || 0)}
+                                              </td>
+                                              <td className="px-4 py-4 text-center">
+                                                <span className={cn(
+                                                  "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider",
+                                                  entry.payment_mode === 'Fonepay' ? "bg-purple-50 text-purple-600" : "bg-gray-100 text-gray-500"
+                                                )}>
+                                                  {entry.payment_mode || 'Cash'}
+                                                </span>
+                                              </td>
+                                            </>
+                                          )}
+                                          {type === 'expenses' && (
+                                            <>
+                                              <td className="px-6 py-4 text-sm font-medium text-gray-900">
+                                                {isEditing ? (
+                                                  <input type="text" className="w-full border rounded px-1" value={entry.description} onChange={(e) => handleUpdateEntry(pIdx, idx, 'description', e.target.value)} />
+                                                ) : entry.description}
+                                              </td>
+                                              <td className="px-4 py-4 text-sm font-semibold font-mono text-right text-red-600">
+                                                {isEditing ? (
+                                                  <input type="number" className="w-20 border rounded px-1 text-right" value={entry.amount} onChange={(e) => handleUpdateEntry(pIdx, idx, 'amount', Number(e.target.value))} />
+                                                ) : (entry.amount || entry.total_amount || entry.total || 0)}
+                                              </td>
+                                              <td className="px-4 py-4 text-center">
+                                                <span className="text-[10px] px-2 py-0.5 bg-orange-50 text-orange-600 rounded-full font-bold uppercase tracking-wider">
+                                                  {entry.category || 'Utility'}
+                                                </span>
+                                              </td>
+                                              <td className="px-4 py-4 text-center">
+                                                <span className={cn(
+                                                  "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider",
+                                                  entry.payment_mode === 'Fonepay' ? "bg-purple-50 text-purple-600" : "bg-gray-100 text-gray-500"
+                                                )}>
+                                                  {entry.payment_mode || 'Cash'}
+                                                </span>
+                                              </td>
+                                            </>
+                                          )}
+                                          {isEditing && <td className="px-4 py-4 text-center"><AlertCircle size={14} className="text-gray-300 mx-auto" /></td>}
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))}
                   </div>
 
                   {/* Raw Text */}
@@ -412,12 +632,23 @@ export default function App() {
                     <button
                       onClick={() => {
                         setResult(null);
-                        setImage(null);
+                        setFile(null);
+                        setIsEditing(false);
                       }}
                       className="flex-1 bg-white border border-gray-200 hover:bg-gray-50 text-gray-600 font-medium py-3 rounded-xl transition-all flex items-center justify-center gap-2"
                     >
                       <RefreshCcw size={18} />
                       Start Over
+                    </button>
+                    <button
+                      onClick={() => setIsEditing(!isEditing)}
+                      className={cn(
+                        "flex-1 font-medium py-3 rounded-xl transition-all flex items-center justify-center gap-2 border",
+                        isEditing ? "bg-orange-50 border-orange-200 text-orange-600" : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
+                      )}
+                    >
+                      <RefreshCcw size={18} className={cn(isEditing && "animate-spin")} />
+                      {isEditing ? 'Finish Editing' : 'Edit Entries'}
                     </button>
                     <button
                       onClick={handleSaveToSheets}
