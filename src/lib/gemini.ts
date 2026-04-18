@@ -38,7 +38,7 @@ export interface ExtractionResult {
   entries: (SaleEntry | EVSessionEntry | ExpenseEntry)[];
   total_amount: number;
   summary_reasoning: string;
-  raw_text: string;
+  raw_text?: string;
   pages?: ExtractionResult[]; // For multi-day PDFs
 }
 
@@ -58,7 +58,23 @@ const ai = new GoogleGenAI({
   apiKey: getApiKey() 
 });
 
-export async function processHandwrittenImage(base64Image: string, mimeType: string = "image/jpeg"): Promise<ExtractionResult> {
+/**
+ * Clean LLM response text that might contain markdown blocks or stray text
+ */
+function cleanJsonResponse(text: string): string {
+  let cleaned = text.trim();
+  // Remove markdown blocks if present
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```[a-z]*\n/i, '').replace(/\n```$/m, '');
+  }
+  return cleaned;
+}
+
+export async function processHandwrittenImage(base64Image: string, mimeType: string = "image/jpeg", priceList?: { item_name: string, rate: number }[]): Promise<ExtractionResult> {
+  const priceListStr = priceList && priceList.length > 0 
+    ? `\n\nUSE THESE ITEM RATES FOR 'SALES' MATCHING (Match item name, if not listed, extract from image):\n${priceList.map(p => `- ${p.item_name}: Rs. ${p.rate}`).join('\n')}`
+    : '';
+
   const prompt = `
     Analyze this handwritten ledger and output JSON.
     Format your response as a JSON object with: 
@@ -67,10 +83,9 @@ export async function processHandwrittenImage(base64Image: string, mimeType: str
     - total_amount: numeric total
     - entries: list of extracted items with payment_mode ("Fonepay" if "P.P", else "Cash")
     - summary_reasoning: brief explanation
-    - raw_text: transcription
     
     If multiple pages, use a "pages" array with similar structure.
-    Sections to find: SN starting lines (EV), middle items (Sales), bottom "Exp" lines (Expenses).
+    Sections to find: SN starting lines (EV), middle items (Sales), bottom "Exp" lines (Expenses).${priceListStr}
   `;
 
   const response = await ai.models.generateContent({
@@ -97,7 +112,6 @@ export async function processHandwrittenImage(base64Image: string, mimeType: str
           date: { type: Type.STRING, description: "Date of first page" },
           total_amount: { type: Type.NUMBER },
           summary_reasoning: { type: Type.STRING },
-          raw_text: { type: Type.STRING },
           entries: {
             type: Type.ARRAY,
             items: {
@@ -137,5 +151,11 @@ export async function processHandwrittenImage(base64Image: string, mimeType: str
     }
   });
 
-  return JSON.parse(response.text.trim());
+  try {
+    const cleaned = cleanJsonResponse(response.text);
+    return JSON.parse(cleaned);
+  } catch (err) {
+    console.error("Failed to parse AI response as JSON. Raw text:", response.text);
+    throw new Error("The AI response was malformed. This can happen with very complex images. Please try with a clearer photo or a smaller section.");
+  }
 }

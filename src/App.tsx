@@ -18,7 +18,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import confetti from 'canvas-confetti';
 import { processHandwrittenImage, type ExtractionResult, hasGeminiApiKey } from './lib/gemini';
 import { cn } from './lib/utils';
-import { supabase, STORAGE_BUCKET, type EVSessionModel, type SalesRecordModel, type ExpenseRecordModel, type ExtractionLogModel } from './lib/supabase';
+import { supabase, STORAGE_BUCKET, type EVSessionModel, type SalesRecordModel, type ExpenseRecordModel, type ExtractionLogModel, type ProductRateModel } from './lib/supabase';
 import * as pdfjsLib from 'pdfjs-dist';
 
 // pdfjs worker setup
@@ -33,8 +33,15 @@ export default function App() {
   const [configStatus, setConfigStatus] = useState<{ hasSheetsId: boolean; hasServiceAccount: boolean; hasAppsScript: boolean; hasGeminiKey: boolean } | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<{ success: boolean; url?: string } | null>(null);
+  const [productRates, setProductRates] = useState<ProductRateModel[]>([]);
+  const [isManagingRates, setIsManagingRates] = useState(false);
+  const [newRate, setNewRate] = useState({ item_name: '', rate: '' });
+  const [bulkRates, setBulkRates] = useState('');
+  const [editingRateId, setEditingRateId] = useState<string | null>(null);
+  const [isBulkMode, setIsBulkMode] = useState(false);
 
   React.useEffect(() => {
+    fetchRates();
     fetch('/api/config-status')
       .then(async res => {
         const contentType = res.headers.get("content-type");
@@ -49,6 +56,121 @@ export default function App() {
         setConfigStatus({ hasSheetsId: false, hasServiceAccount: false, hasAppsScript: false, hasGeminiKey: hasGeminiApiKey() });
       });
   }, []);
+
+  const fetchRates = async () => {
+    try {
+      const { data, error } = await supabase.from('sales_items').select('*').order('item_name');
+      if (error) {
+        // Handle table not found (42P01 is PostgreSQL code for undefined_table)
+        if (error.code === '42P01') {
+          console.warn('Supabase table "sales_items" not found. Using local extraction only.');
+          return;
+        }
+        console.error('Error fetching rates:', error);
+        return;
+      }
+      if (data) setProductRates(data);
+    } catch (err) {
+      console.warn('Supabase is not reachable or table is missing:', err);
+    }
+  };
+
+  const addRate = async () => {
+    if (!newRate.item_name || !newRate.rate) return;
+    
+    if (editingRateId) {
+      const { error } = await supabase
+        .from('sales_items')
+        .update({ 
+          item_name: newRate.item_name, 
+          rate: parseFloat(newRate.rate) 
+        })
+        .eq('id', editingRateId);
+      
+      if (!error) {
+        setEditingRateId(null);
+        setNewRate({ item_name: '', rate: '' });
+        fetchRates();
+      }
+    } else {
+      const { error } = await supabase.from('sales_items').insert([{ 
+        item_name: newRate.item_name, 
+        rate: parseFloat(newRate.rate) 
+      }]);
+      if (!error) {
+        setNewRate({ item_name: '', rate: '' });
+        fetchRates();
+      }
+    }
+  };
+
+  const addBulkRates = async () => {
+    if (!bulkRates.trim()) return;
+    
+    const lines = bulkRates.split('\n');
+    const toInsert = lines.map(line => {
+      const [name, rate] = line.split(/[,\t]/).map(s => s.trim());
+      if (name && rate && !isNaN(parseFloat(rate))) {
+        return { item_name: name, rate: parseFloat(rate) };
+      }
+      return null;
+    }).filter(Boolean) as any[];
+
+    if (toInsert.length === 0) return;
+
+    const { error } = await supabase.from('sales_items').upsert(toInsert, { onConflict: 'item_name' });
+    if (!error) {
+      setBulkRates('');
+      setIsBulkMode(false);
+      fetchRates();
+    } else {
+      alert('Error saving bulk rates. Ensure item names are unique.');
+    }
+  };
+
+  const deleteRate = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this item?')) return;
+    await supabase.from('sales_items').delete().eq('id', id);
+    fetchRates();
+  };
+
+  const startEditing = (rate: ProductRateModel) => {
+    if (!rate.id) return;
+    setEditingRateId(rate.id);
+    setNewRate({ item_name: rate.item_name, rate: rate.rate.toString() });
+    setIsBulkMode(false);
+  };
+
+  const compressImage = async (base64Str: string): Promise<string> => {
+    if (base64Str.startsWith('data:application/pdf')) return base64Str;
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.src = base64Str;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX_WIDTH = 1200;
+        const MAX_HEIGHT = 1600;
+        let width = img.width;
+        let height = img.height;
+        if (width > height) {
+          if (width > MAX_WIDTH) {
+            height *= MAX_WIDTH / width;
+            width = MAX_WIDTH;
+          }
+        } else {
+          if (height > MAX_HEIGHT) {
+            width *= MAX_HEIGHT / height;
+            height = MAX_HEIGHT;
+          }
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx?.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', 0.8));
+      };
+    });
+  };
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const file = acceptedFiles[0];
@@ -144,7 +266,7 @@ export default function App() {
       // Log extraction
       await supabase.from('extraction_logs').insert({
         file_name: file?.name,
-        raw_text: extraction.raw_text,
+        raw_text: extraction.raw_text || 'Extraction logic bypass',
         file_url: fileUrl || undefined
       });
     } catch (err) {
@@ -162,7 +284,8 @@ export default function App() {
       if (fileUrl) setUploadStatus({ success: true, url: fileUrl });
 
       // 2. Run Gemini Extraction
-      const data = await processHandwrittenImage(file.data, file.type);
+      const optimizedData = await compressImage(file.data);
+      const data = await processHandwrittenImage(optimizedData, file.type, productRates.map(r => ({ item_name: r.item_name, rate: r.rate })));
       setResult(data);
       
       // 3. Save to Supabase (separate tables)
@@ -220,7 +343,7 @@ export default function App() {
           date: result.date,
           entries: result.entries,
           total_amount: result.total_amount,
-          raw_text: result.raw_text,
+          raw_text: result.raw_text || '',
           file_url: uploadStatus?.url
         }),
       });
@@ -271,6 +394,12 @@ export default function App() {
             <h1 className="font-semibold text-lg tracking-tight">Nepali Finance Extractor</h1>
           </div>
           <div className="flex items-center gap-4">
+            <button 
+              onClick={() => setIsManagingRates(true)}
+              className="text-sm text-gray-500 hover:text-orange-600 flex items-center gap-1 transition-colors"
+            >
+              Item Rates <Plus size={14} />
+            </button>
             <a 
               href="https://docs.google.com/spreadsheets/d/1_9K7TmzhSp5pbNJjUw7giomvf0gPU953KquKgpD6RZU/edit?usp=sharing" 
               target="_blank" 
@@ -644,12 +773,14 @@ export default function App() {
                   </div>
 
                   {/* Raw Text */}
-                  <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
-                    <h3 className="text-xs font-bold uppercase tracking-widest text-gray-400 mb-3">Raw Extracted Text</h3>
-                    <div className="bg-gray-50 rounded-xl p-4 text-sm text-gray-600 font-mono whitespace-pre-wrap border border-gray-100">
-                      {result.raw_text}
+                  {result.raw_text && (
+                    <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
+                      <h3 className="text-xs font-bold uppercase tracking-widest text-gray-400 mb-3">Raw Extracted Text</h3>
+                      <div className="bg-gray-50 rounded-xl p-4 text-sm text-gray-600 font-mono whitespace-pre-wrap border border-gray-100">
+                        {result.raw_text}
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   {/* Action Footer */}
                   <div className="flex items-center gap-4 pt-4">
@@ -693,6 +824,183 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      {/* Item Rates Modal */}
+      <AnimatePresence>
+        {isManagingRates && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => {
+                setIsManagingRates(false);
+                setEditingRateId(null);
+                setNewRate({ item_name: '', rate: '' });
+              }}
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-lg bg-white rounded-3xl shadow-2xl overflow-hidden"
+            >
+              <div className="p-6 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+                <div>
+                  <h2 className="text-xl font-bold text-gray-900">Price List Management</h2>
+                  <p className="text-xs text-gray-500 mt-0.5">Define item rates for AI matching</p>
+                </div>
+                <button 
+                  onClick={() => {
+                    setIsManagingRates(false);
+                    setEditingRateId(null);
+                    setNewRate({ item_name: '', rate: '' });
+                  }} 
+                  className="w-8 h-8 rounded-full flex items-center justify-center hover:bg-white transition-colors text-gray-400"
+                >
+                  <RefreshCcw size={18} className="rotate-45" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-6">
+                <div className="flex items-center gap-2 p-1 bg-gray-100 rounded-xl">
+                  <button 
+                    onClick={() => setIsBulkMode(false)}
+                    className={cn(
+                      "flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all",
+                      !isBulkMode ? "bg-white shadow-sm text-gray-900" : "text-gray-500"
+                    )}
+                  >
+                    Single Entry
+                  </button>
+                  <button 
+                    onClick={() => setIsBulkMode(true)}
+                    className={cn(
+                      "flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all",
+                      isBulkMode ? "bg-white shadow-sm text-gray-900" : "text-gray-500"
+                    )}
+                  >
+                    Bulk Import
+                  </button>
+                </div>
+
+                {!isBulkMode ? (
+                  <div className="flex gap-2">
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Americano" 
+                      value={newRate.item_name}
+                      onChange={e => setNewRate({...newRate, item_name: e.target.value})}
+                      className="flex-1 text-sm border-gray-200 rounded-xl focus:ring-orange-500 focus:border-orange-500 h-10"
+                    />
+                    <input 
+                      type="number" 
+                      placeholder="Rate" 
+                      value={newRate.rate}
+                      onChange={e => setNewRate({...newRate, rate: e.target.value})}
+                      className="w-24 text-sm border-gray-200 rounded-xl focus:ring-orange-500 focus:border-orange-500 h-10"
+                    />
+                    <button 
+                      onClick={addRate}
+                      className={cn(
+                        "text-white px-4 rounded-xl transition-all h-10 flex items-center gap-2",
+                        editingRateId ? "bg-blue-600 hover:bg-blue-700" : "bg-orange-500 hover:bg-orange-600"
+                      )}
+                    >
+                      {editingRateId ? <Save size={18} /> : <Plus size={18} />}
+                      {editingRateId ? 'Update' : 'Add'}
+                    </button>
+                    {editingRateId && (
+                      <button 
+                        onClick={() => {
+                          setEditingRateId(null);
+                          setNewRate({ item_name: '', rate: ''});
+                        }}
+                        className="bg-gray-100 text-gray-500 px-4 rounded-xl hover:bg-gray-200 h-10"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="relative">
+                      <textarea 
+                        placeholder="Item Name, Rate&#10;Burger, 250&#10;Pizza, 450"
+                        value={bulkRates}
+                        onChange={e => setBulkRates(e.target.value)}
+                        className="w-full h-32 text-sm border-gray-200 rounded-xl focus:ring-orange-500 focus:border-orange-500 p-3 font-mono"
+                      />
+                      <p className="text-[10px] text-gray-400 mt-1 italic">Format: Item Name, Rate (one per line). Names must be unique.</p>
+                    </div>
+                    <button 
+                      onClick={addBulkRates}
+                      className="w-full bg-orange-500 text-white font-semibold py-2 rounded-xl hover:bg-orange-600 transition-all flex items-center justify-center gap-2"
+                    >
+                      <Upload size={16} />
+                      Process Bulk Import
+                    </button>
+                  </div>
+                )}
+                
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Current Price List</h3>
+                    <span className="text-[10px] font-bold text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">{productRates.length} Items</span>
+                  </div>
+                  <div className="max-h-[300px] overflow-y-auto pr-1 space-y-2 custom-scrollbar">
+                    {productRates.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-10 text-gray-300">
+                        <FileText size={40} className="mb-2 opacity-20" />
+                        <p className="text-sm italic">No rates defined yet.</p>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 gap-2">
+                        {productRates.map(rate => (
+                          <div key={rate.id} className={cn(
+                            "flex items-center justify-between p-3 rounded-2xl group transition-all",
+                            editingRateId === rate.id ? "bg-blue-50 border border-blue-100" : "bg-gray-50 border border-transparent hover:border-gray-200"
+                          )}>
+                            <div className="flex items-center gap-3">
+                              <div className={cn(
+                                "w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold",
+                                editingRateId === rate.id ? "bg-blue-100 text-blue-600" : "bg-white text-gray-400"
+                              )}>
+                                {rate.item_name.charAt(0).toUpperCase()}
+                              </div>
+                              <div>
+                                <p className="text-sm font-semibold text-gray-900 leading-none">{rate.item_name}</p>
+                                <p className="text-xs text-orange-600 font-mono mt-1">Rs. {rate.rate}</p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button 
+                                onClick={() => startEditing(rate)}
+                                className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-blue-100 text-blue-600 transition-all"
+                                title="Edit"
+                              >
+                                <RefreshCcw size={16} />
+                              </button>
+                              <button 
+                                onClick={() => rate.id && deleteRate(rate.id)}
+                                className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-red-100 text-red-500 transition-all"
+                                title="Delete"
+                              >
+                                <Minus size={16} />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

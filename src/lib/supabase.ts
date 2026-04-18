@@ -63,3 +63,10 @@ export interface ExtractionLogModel {
   raw_text: string;
   file_url?: string;
 }
+
+export interface ProductRateModel {
+  id?: string;
+  item_name: string;
+  rate: number;
+  created_at?: string;
+}
