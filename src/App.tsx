@@ -43,6 +43,7 @@ export default function App() {
   const [isBulkMode, setIsBulkMode] = useState(false);
   const [showSetupWarning, setShowSetupWarning] = useState(false);
   const [itemCorrections, setItemCorrections] = useState<ItemCorrectionModel[]>([]);
+  const [processingProgress, setProcessingProgress] = useState<{ current: number; total: number; stage: string } | null>(null);
 
   React.useEffect(() => {
     const checkSetup = async () => {
@@ -189,8 +190,8 @@ export default function App() {
       img.src = base64Str;
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 1200;
-        const MAX_HEIGHT = 1600;
+        const MAX_WIDTH = 1024; // Smaller for faster AI and upload
+        const MAX_HEIGHT = 1200;
         let width = img.width;
         let height = img.height;
         if (width > height) {
@@ -227,11 +228,14 @@ export default function App() {
     }
   }, []);
 
-  const uploadFileToSupabase = async () => {
+  const uploadFileToSupabase = async (compressedBase64?: string) => {
     if (!file) return null;
     
+    // Use compressed version if available to save bandwidth
+    const targetData = compressedBase64 || file.data;
+    
     // Convert base64 to Blob
-    const base64Data = file.data.split(',')[1];
+    const base64Data = targetData.split(',')[1];
     const byteCharacters = atob(base64Data);
     const byteNumbers = new Array(byteCharacters.length);
     for (let i = 0; i < byteCharacters.length; i++) {
@@ -326,52 +330,119 @@ export default function App() {
 
     setIsProcessing(true);
     setError(null);
+    setProcessingProgress({ current: 0, total: 1, stage: 'Starting...' });
+    
     try {
-    // 1. Upload file to bucket
-    const fileUrl = await uploadFileToSupabase();
-    if (fileUrl) {
-      setUploadStatus({ success: true, url: fileUrl });
-    } else {
-      // If upload fails, we can still try to analyze, but warn the user or log it
-      console.warn('Storage upload failed, proceeding with direct analysis.');
-    }
+      let finalResult: ExtractionResult | null = null;
+      let finalFileUrl: string | null = null;
 
-      // 2. Run Gemini Extraction
-      const optimizedData = await compressImage(file.data);
-      let data = await processHandwrittenImage(optimizedData, file.type, productRates.map(r => ({ item_name: r.item_name, rate: r.rate })));
-      
-      // 3. AI Refinement Pass (Step 1-4 from instructions)
-      if (data.entry_type === 'sales') {
-        const refinedEntries = await refineSalesData(
-          data.entries, 
-          productRates.map(r => ({ item_name: r.item_name, rate: r.rate })),
-          itemCorrections.map(c => ({ wrong_text: c.wrong_text, correct_text: c.correct_text }))
-        );
-        data.entries = refinedEntries;
-        // Recalculate global total
-        data.total_amount = refinedEntries.reduce((sum, entry: any) => sum + (entry.total_amount || 0), 0);
-      }
-      
-      setResult(data);
-      
-      // 4. Save to Supabase (separate tables)
-      if (data.pages && data.pages.length > 0) {
-        for (const page of data.pages) {
-          await saveToSupabase(page, fileUrl);
+      if (file.type === 'application/pdf') {
+        // Multi-page PDF Logic
+        setProcessingProgress({ current: 0, total: 0, stage: 'PDF Splitting...' });
+        const pdf = await pdfjsLib.getDocument(file.data).promise;
+        const totalPages = pdf.numPages;
+        setProcessingProgress({ current: 0, total: totalPages, stage: 'Analyzing pages...' });
+
+        const results: ExtractionResult[] = [];
+        
+        // Process pages sequentially to avoid overwhelming the API and provide feedback
+        for (let i = 1; i <= totalPages; i++) {
+          setProcessingProgress({ current: i, total: totalPages, stage: `Processing page ${i} of ${totalPages}...` });
+          
+          const page = await pdf.getPage(i);
+          const viewport = page.getViewport({ scale: 1.5 });
+          const canvas = document.createElement('canvas');
+          const context = canvas.getContext('2d')!;
+          canvas.height = viewport.height;
+          canvas.width = viewport.width;
+          
+          await page.render({ canvasContext: context, viewport, canvas } as any).promise;
+          const pageDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+          
+          // AI Extraction for this page
+          const pageResult = await processHandwrittenImage(pageDataUrl, 'image/jpeg');
+          
+          // Refinement for this page
+          if (pageResult.entry_type === 'sales') {
+            const refined = await refineSalesData(
+              pageResult.entries, 
+              productRates.map(r => ({ item_name: r.item_name, rate: r.rate })),
+              itemCorrections.map(c => ({ wrong_text: c.wrong_text, correct_text: c.correct_text }))
+            );
+            pageResult.entries = refined;
+            pageResult.total_amount = refined.reduce((sum, e: any) => sum + (e.total_amount || 0), 0);
+          }
+          
+          results.push(pageResult);
         }
+
+        // Aggregate results
+        finalResult = {
+          entry_type: results[0].entry_type,
+          date: results[0].date,
+          entries: [],
+          total_amount: results.reduce((sum, r) => sum + (r.total_amount || 0), 0),
+          summary_reasoning: `Combined ${results.length} pages of reports.`,
+          pages: results
+        };
+
+        // Upload the full PDF once
+        setProcessingProgress({ current: totalPages, total: totalPages, stage: 'Uploading report...' });
+        finalFileUrl = await uploadFileToSupabase();
+
       } else {
-        await saveToSupabase(data, fileUrl);
+        // Single Image Logic
+        setProcessingProgress({ current: 0, total: 1, stage: 'Compressing...' });
+        const optimizedData = await compressImage(file.data);
+
+        setProcessingProgress({ current: 1, total: 1, stage: 'Analyzing image...' });
+        const [data, fileUrl] = await Promise.all([
+          processHandwrittenImage(optimizedData, file.type),
+          uploadFileToSupabase(optimizedData)
+        ]);
+        
+        finalFileUrl = fileUrl;
+
+        if (data.entry_type === 'sales') {
+          const refined = await refineSalesData(
+            data.entries, 
+            productRates.map(r => ({ item_name: r.item_name, rate: r.rate })),
+            itemCorrections.map(c => ({ wrong_text: c.wrong_text, correct_text: c.correct_text }))
+          );
+          data.entries = refined;
+          data.total_amount = refined.reduce((sum, e: any) => sum + (e.total_amount || 0), 0);
+        }
+        finalResult = data;
+      }
+
+      if (finalFileUrl) {
+        setUploadStatus({ success: true, url: finalFileUrl });
+      }
+
+      if (finalResult) {
+        setResult(finalResult);
+        
+        // Save to Supabase
+        setProcessingProgress(p => p ? { ...p, stage: 'Saving to database...' } : null);
+        if (finalResult.pages && finalResult.pages.length > 0) {
+          for (const page of finalResult.pages) {
+            await saveToSupabase(page, finalFileUrl);
+          }
+        } else {
+          await saveToSupabase(finalResult, finalFileUrl);
+        }
       }
       
     } catch (err: any) {
       console.error(err);
       if (err.message?.includes('leaked') || err.message?.includes('403')) {
-        setError('Your API key has been revoked by Google because it was detected in public code. Please generate a NEW key at aistudio.google.com and add it using the Secrets menu (gear icon).');
+        setError('Your API key has been revoked. Please generate a NEW key at aistudio.google.com and add it using the Secrets menu.');
       } else {
-        setError('Failed to process. Please try again.');
+        setError(`Failed: ${err.message || 'Unknown error'}. Please try smaller batches or refresh.`);
       }
     } finally {
       setIsProcessing(false);
+      setProcessingProgress(null);
     }
   };
 
@@ -571,21 +642,36 @@ export default function App() {
                   <button
                     onClick={handleProcess}
                     disabled={isProcessing || !hasGeminiApiKey()}
-                    className="w-full bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 text-white font-medium py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-orange-200"
+                    className="w-full bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 text-white font-medium py-3 rounded-xl transition-all flex flex-col items-center justify-center gap-1 shadow-lg shadow-orange-200"
                   >
-                    {isProcessing ? (
-                      <>
-                        <RefreshCcw size={18} className="animate-spin" />
-                        <div className="flex flex-col items-start leading-tight">
-                          <span className="text-sm">Analyzing Text...</span>
-                          <span className="text-[10px] opacity-80 font-normal italic">Can take 15-30s</span>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        Analyze with AI
+                    {!isProcessing ? (
+                      <div className="flex items-center gap-2">
+                        <span>Analyze with AI</span>
                         <ArrowRight size={18} />
-                      </>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center gap-2 w-full px-4">
+                        <div className="flex items-center gap-3">
+                          <RefreshCcw size={18} className="animate-spin" />
+                          <span className="text-sm font-bold">
+                            {processingProgress ? processingProgress.stage : "Analyzing..."}
+                          </span>
+                        </div>
+                        {processingProgress && processingProgress.total > 1 && (
+                          <div className="w-full bg-orange-700/30 rounded-full h-1.5 overflow-hidden">
+                            <motion.div 
+                              initial={{ width: 0 }}
+                              animate={{ width: `${Math.max(5, (processingProgress.current / processingProgress.total) * 100)}%` }}
+                              className="bg-white h-full rounded-full"
+                            />
+                          </div>
+                        )}
+                        <span className="text-[10px] opacity-80 font-normal italic">
+                          {processingProgress && processingProgress.total > 1 
+                            ? `Page ${processingProgress.current} of ${processingProgress.total}`
+                            : "This can take 15-30s"}
+                        </span>
+                      </div>
                     )}
                   </button>
                 </div>

@@ -140,25 +140,21 @@ function cleanJsonResponse(text: string): string {
   return cleaned;
 }
 
-export async function processHandwrittenImage(base64Image: string, mimeType: string = "image/jpeg", priceList?: { item_name: string, rate: number }[]): Promise<ExtractionResult> {
-  const priceListStr = priceList && priceList.length > 0 
-    ? `\n\nUSE THESE ITEM RATES FOR 'SALES' MATCHING (Match item name, if not listed, extract from image):\n${priceList.map(p => `- ${p.item_name}: Rs. ${p.rate}`).join('\n')}`
-    : '';
-
+export async function processHandwrittenImage(base64Image: string, mimeType: string = "image/jpeg"): Promise<ExtractionResult> {
   const prompt = `
     Analyze this handwritten ledger and output ONLY a valid JSON object. 
     Do not include any chat or preamble.
+    Your job is to READ and STRUCTURE the text.
     Format your response as a JSON object with: 
     - date: (YYYY-MM-DD, assume year 2026)
     - entry_type: "sales", "ev_sessions", or "expenses"
-    - total_amount: numeric total calculated from entries
     - entries: list of extracted items with payment_mode ("Fonepay" if "P.P", else "Cash")
     - summary_reasoning: brief explanation
     
     If multiple pages, use a "pages" array with similar structure.
-    Sections to find: SN starting lines (EV), middle items (Sales), bottom "Exp" lines (Expenses).${priceListStr}
+    Sections to find: SN starting lines (EV), middle items (Sales), bottom "Exp" lines (Expenses).
     
-    IMPORTANT: Ensure the JSON is numerically accurate. If an amount is unclear, mark uncertain: true.
+    IMPORTANT: Just read the raw text as accurately as possible. Do not perform calculations.
   `;
 
   const response = await ai.models.generateContent({
