@@ -13,6 +13,22 @@ CREATE TABLE IF NOT EXISTS ev_sessions (
   file_url TEXT -- To link to the stored image/pdf
 );
 
+-- Table for Product Rates (Master Data)
+CREATE TABLE IF NOT EXISTS sales_items (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  item_name TEXT NOT NULL UNIQUE,
+  rate NUMERIC NOT NULL
+);
+
+-- Table for Self-Learning Corrections
+CREATE TABLE IF NOT EXISTS item_corrections (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  wrong_text TEXT NOT NULL UNIQUE,
+  correct_text TEXT NOT NULL
+);
+
 -- Table for Sales Records
 CREATE TABLE IF NOT EXISTS sales_records (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -53,12 +69,27 @@ ALTER TABLE ev_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sales_records ENABLE ROW LEVEL SECURITY;
 ALTER TABLE expense_records ENABLE ROW LEVEL SECURITY;
 ALTER TABLE extraction_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sales_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE item_corrections ENABLE ROW LEVEL SECURITY;
 
--- Create policy for public access
+-- Create policy for public access - IDEMPOTENT (Drop if exists first)
+DROP POLICY IF EXISTS "Public full access ev" ON ev_sessions;
 CREATE POLICY "Public full access ev" ON ev_sessions FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Public full access sales" ON sales_records;
 CREATE POLICY "Public full access sales" ON sales_records FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Public full access expenses" ON expense_records;
 CREATE POLICY "Public full access expenses" ON expense_records FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Public full access logs" ON extraction_logs;
 CREATE POLICY "Public full access logs" ON extraction_logs FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Public full access sales_items" ON sales_items;
+CREATE POLICY "Public full access sales_items" ON sales_items FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Public full access corrections" ON item_corrections;
+CREATE POLICY "Public full access corrections" ON item_corrections FOR ALL USING (true) WITH CHECK (true);
 
 -- STORAGE SETUP
 -- Note: Buckets are often created via the Supabase UI, 
@@ -66,16 +97,19 @@ CREATE POLICY "Public full access logs" ON extraction_logs FOR ALL USING (true) 
 -- INSERT INTO storage.buckets (id, name, public) VALUES ('extracted-docs', 'extracted-docs', true);
 
 -- ALLOW PUBLIC UPLOADS TO THE BUCKET
+DROP POLICY IF EXISTS "Public Upload" ON storage.objects;
 CREATE POLICY "Public Upload"
 ON storage.objects FOR INSERT
 WITH CHECK ( bucket_id = 'extracted-docs' );
 
 -- ALLOW PUBLIC ACCESS TO VIEW FILES
+DROP POLICY IF EXISTS "Public View" ON storage.objects;
 CREATE POLICY "Public View"
 ON storage.objects FOR SELECT
 USING ( bucket_id = 'extracted-docs' );
 
 -- ALLOW PUBLIC UPDATE (to overwrite or modify if needed)
+DROP POLICY IF EXISTS "Public Update" ON storage.objects;
 CREATE POLICY "Public Update"
 ON storage.objects FOR UPDATE
 WITH CHECK ( bucket_id = 'extracted-docs' );

@@ -16,9 +16,9 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import confetti from 'canvas-confetti';
-import { processHandwrittenImage, type ExtractionResult, hasGeminiApiKey } from './lib/gemini';
+import { processHandwrittenImage, refineSalesData, type ExtractionResult, hasGeminiApiKey } from './lib/gemini';
 import { cn } from './lib/utils';
-import { supabase, STORAGE_BUCKET, type EVSessionModel, type SalesRecordModel, type ExpenseRecordModel, type ExtractionLogModel, type ProductRateModel } from './lib/supabase';
+import { supabase, STORAGE_BUCKET, type EVSessionModel, type SalesRecordModel, type ExpenseRecordModel, type ExtractionLogModel, type ProductRateModel, type ItemCorrectionModel } from './lib/supabase';
 import * as pdfjsLib from 'pdfjs-dist';
 
 // pdfjs worker setup
@@ -42,10 +42,12 @@ export default function App() {
   const [editingRateId, setEditingRateId] = useState<string | null>(null);
   const [isBulkMode, setIsBulkMode] = useState(false);
   const [showSetupWarning, setShowSetupWarning] = useState(false);
+  const [itemCorrections, setItemCorrections] = useState<ItemCorrectionModel[]>([]);
 
   React.useEffect(() => {
     const checkSetup = async () => {
       await fetchRates();
+      await fetchCorrections();
       try {
         const res = await fetch('/api/config-status');
         const contentType = res.headers.get("content-type");
@@ -72,9 +74,8 @@ export default function App() {
     try {
       const { data, error } = await supabase.from('sales_items').select('*').order('item_name');
       if (error) {
-        // Handle table not found (42P01 is PostgreSQL code for undefined_table)
         if (error.code === '42P01') {
-          console.warn('Supabase table "sales_items" not found. Using local extraction only.');
+          console.warn('Supabase table "sales_items" not found.');
           return;
         }
         console.error('Error fetching rates:', error);
@@ -82,7 +83,36 @@ export default function App() {
       }
       if (data) setProductRates(data);
     } catch (err) {
-      console.warn('Supabase is not reachable or table is missing:', err);
+      console.warn('Supabase failure:', err);
+    }
+  };
+
+  const fetchCorrections = async () => {
+    try {
+      const { data, error } = await supabase.from('item_corrections').select('*');
+      if (error) {
+        if (error.code === '42P01') return;
+        console.error('Error fetching corrections:', error);
+        return;
+      }
+      if (data) setItemCorrections(data);
+    } catch (err) {
+      console.warn('Supabase corrections error:', err);
+    }
+  };
+
+  const handleLearnCorrection = async (wrong: string, correct: string) => {
+    if (!wrong || !correct || wrong === correct) return;
+    try {
+      const { error } = await supabase.from('item_corrections').upsert([{ 
+        wrong_text: wrong, 
+        correct_text: correct 
+      }], { onConflict: 'wrong_text' });
+      if (!error) {
+        fetchCorrections();
+      }
+    } catch (err) {
+      console.warn('Learning failed:', err);
     }
   };
 
@@ -308,10 +338,23 @@ export default function App() {
 
       // 2. Run Gemini Extraction
       const optimizedData = await compressImage(file.data);
-      const data = await processHandwrittenImage(optimizedData, file.type, productRates.map(r => ({ item_name: r.item_name, rate: r.rate })));
+      let data = await processHandwrittenImage(optimizedData, file.type, productRates.map(r => ({ item_name: r.item_name, rate: r.rate })));
+      
+      // 3. AI Refinement Pass (Step 1-4 from instructions)
+      if (data.entry_type === 'sales') {
+        const refinedEntries = await refineSalesData(
+          data.entries, 
+          productRates.map(r => ({ item_name: r.item_name, rate: r.rate })),
+          itemCorrections.map(c => ({ wrong_text: c.wrong_text, correct_text: c.correct_text }))
+        );
+        data.entries = refinedEntries;
+        // Recalculate global total
+        data.total_amount = refinedEntries.reduce((sum, entry: any) => sum + (entry.total_amount || 0), 0);
+      }
+      
       setResult(data);
       
-      // 3. Save to Supabase (separate tables)
+      // 4. Save to Supabase (separate tables)
       if (data.pages && data.pages.length > 0) {
         for (const page of data.pages) {
           await saveToSupabase(page, fileUrl);
@@ -396,17 +439,21 @@ export default function App() {
   };
 
   const toggleUncertainty = (index: number) => {
-    if (!result) return;
+    if (!result || !result.entries) return;
     const newEntries = [...result.entries];
-    (newEntries[index] as any).uncertain = !(newEntries[index] as any).uncertain;
-    setResult({ ...result, entries: newEntries });
+    if (newEntries[index]) {
+      (newEntries[index] as any).uncertain = !(newEntries[index] as any).uncertain;
+      setResult({ ...result, entries: newEntries });
+    }
   };
 
   const updateCategory = (index: number, newCategory: string) => {
-    if (!result) return;
+    if (!result || !result.entries) return;
     const newEntries = [...result.entries];
-    (newEntries[index] as any).category = newCategory;
-    setResult({ ...result, entries: newEntries });
+    if (newEntries[index]) {
+      (newEntries[index] as any).category = newCategory;
+      setResult({ ...result, entries: newEntries });
+    }
   };
 
   return (
@@ -713,18 +760,44 @@ export default function App() {
                                       const pIdx = result.pages ? pageIdx : null;
 
                                       return (
-                                        <tr key={idx} className="hover:bg-gray-50/50 transition-colors group">
+                                        <tr key={idx} className={cn(
+                                          "hover:bg-gray-50/50 transition-colors group",
+                                          entry.uncertain && "bg-red-50/30"
+                                        )}>
                                           {type === 'sales' && (
                                             <>
                                               <td className="px-6 py-4 text-sm font-medium text-gray-900">
-                                                {isEditing ? (
-                                                  <input 
-                                                    type="text" 
-                                                    className="w-full border rounded px-1" 
-                                                    value={entry.item_name} 
-                                                    onChange={(e) => handleUpdateEntry(pIdx, idx, 'item_name', e.target.value)}
-                                                  />
-                                                ) : entry.item_name}
+                                                <div className="flex flex-col gap-1">
+                                                  <div className="flex items-center gap-2">
+                                                    {isEditing ? (
+                                                      <input 
+                                                        type="text" 
+                                                        className="w-full border rounded px-1" 
+                                                        value={entry.item_name} 
+                                                        onChange={(e) => handleUpdateEntry(pIdx, idx, 'item_name', e.target.value)}
+                                                        onBlur={(e) => {
+                                                          if (entry.corrected_from) handleLearnCorrection(entry.corrected_from, e.target.value);
+                                                        }}
+                                                      />
+                                                    ) : entry.item_name}
+                                                    {entry.uncertain && <AlertCircle size={14} className="text-red-500 shrink-0" />}
+                                                  </div>
+                                                  
+                                                  {(entry.corrected_from || entry.matched_from) && !isEditing && (
+                                                    <div className="flex flex-wrap gap-1">
+                                                      {entry.corrected_from && (
+                                                        <span className="text-[9px] bg-orange-100 text-orange-600 px-1 rounded font-medium">
+                                                          Fixed from: {entry.corrected_from}
+                                                        </span>
+                                                      )}
+                                                      {entry.matched_from && (
+                                                        <span className="text-[9px] bg-blue-100 text-blue-600 px-1 rounded font-medium">
+                                                          Matched: {entry.matched_from}
+                                                        </span>
+                                                      )}
+                                                    </div>
+                                                  )}
+                                                </div>
                                               </td>
                                               <td className="px-4 py-4 text-sm font-mono text-right text-gray-600">
                                                 {isEditing ? (

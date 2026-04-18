@@ -70,3 +70,10 @@ export interface ProductRateModel {
   rate: number;
   created_at?: string;
 }
+
+export interface ItemCorrectionModel {
+  id?: string;
+  wrong_text: string;
+  correct_text: string;
+  created_at?: string;
+}
