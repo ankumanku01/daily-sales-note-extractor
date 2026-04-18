@@ -299,7 +299,11 @@ export default function App() {
       
     } catch (err: any) {
       console.error(err);
-      setError('Failed to process. Please try again.');
+      if (err.message?.includes('leaked') || err.message?.includes('403')) {
+        setError('Your API key has been revoked by Google because it was detected in public code. Please generate a NEW key at aistudio.google.com and add it using the Secrets menu (gear icon).');
+      } else {
+        setError('Failed to process. Please try again.');
+      }
     } finally {
       setIsProcessing(false);
     }

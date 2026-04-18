@@ -43,13 +43,9 @@ export interface ExtractionResult {
 }
 
 const getApiKey = () => {
-  // HARDCODE YOUR GEMINI API KEY HERE FOR VERCEL:
-  const HARDCODED_GEMINI_KEY = "AIzaSyDGvao3dbYxWTkM1tJ4-ipVegT56odcI2s"; 
-  
-  const browserKey = (import.meta as any).env?.VITE_GEMINI_API_KEY;
-  const processKey = typeof process !== 'undefined' ? process.env?.GEMINI_API_KEY : undefined;
-  
-  return browserKey || processKey || HARDCODED_GEMINI_KEY; 
+  // Access key securely from environment variables.
+  // In this environment, use GEMINI_API_KEY. On Vercel, use VITE_GEMINI_API_KEY.
+  return process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY;
 };
 
 export const hasGeminiApiKey = () => !!getApiKey();

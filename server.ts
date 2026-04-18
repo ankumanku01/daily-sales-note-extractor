@@ -63,11 +63,18 @@ app.post('/api/save-to-sheets', async (req, res) => {
 
     // Method 2: Service Account
     if (!spreadsheetId || !serviceAccountKey) {
-      return res.status(400).json({ error: 'Google Sheets configuration missing' });
+      return res.status(400).json({ error: 'Google Sheets configuration missing. Set GOOGLE_SHEETS_ID and GOOGLE_SERVICE_ACCOUNT_KEY.' });
+    }
+
+    let credentials;
+    try {
+      credentials = JSON.parse(serviceAccountKey);
+    } catch (e) {
+      return res.status(500).json({ error: 'Malformed GOOGLE_SERVICE_ACCOUNT_KEY. Ensure it is a valid JSON string.' });
     }
 
     const auth = new GoogleAuth({
-      credentials: JSON.parse(serviceAccountKey),
+      credentials,
       scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
 
