@@ -64,3 +64,18 @@ CREATE POLICY "Public full access logs" ON extraction_logs FOR ALL USING (true) 
 -- Note: Buckets are often created via the Supabase UI, 
 -- but you can use the storage schema if you have permissions.
 -- INSERT INTO storage.buckets (id, name, public) VALUES ('extracted-docs', 'extracted-docs', true);
+
+-- ALLOW PUBLIC UPLOADS TO THE BUCKET
+CREATE POLICY "Public Upload"
+ON storage.objects FOR INSERT
+WITH CHECK ( bucket_id = 'extracted-docs' );
+
+-- ALLOW PUBLIC ACCESS TO VIEW FILES
+CREATE POLICY "Public View"
+ON storage.objects FOR SELECT
+USING ( bucket_id = 'extracted-docs' );
+
+-- ALLOW PUBLIC UPDATE (to overwrite or modify if needed)
+CREATE POLICY "Public Update"
+ON storage.objects FOR UPDATE
+WITH CHECK ( bucket_id = 'extracted-docs' );

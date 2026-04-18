@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import confetti from 'canvas-confetti';
-import { processHandwrittenImage, type ExtractionResult } from './lib/gemini';
+import { processHandwrittenImage, type ExtractionResult, hasGeminiApiKey } from './lib/gemini';
 import { cn } from './lib/utils';
 import { supabase, STORAGE_BUCKET, type EVSessionModel, type SalesRecordModel, type ExpenseRecordModel, type ExtractionLogModel } from './lib/supabase';
 import * as pdfjsLib from 'pdfjs-dist';
@@ -36,9 +36,18 @@ export default function App() {
 
   React.useEffect(() => {
     fetch('/api/config-status')
-      .then(res => res.json())
+      .then(async res => {
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          return res.json();
+        }
+        return { hasSheetsId: false, hasServiceAccount: false, hasAppsScript: false, hasGeminiKey: hasGeminiApiKey() };
+      })
       .then(setConfigStatus)
-      .catch(console.error);
+      .catch((err) => {
+        console.warn('Backend not detected, running in client-mode:', err);
+        setConfigStatus({ hasSheetsId: false, hasServiceAccount: false, hasAppsScript: false, hasGeminiKey: hasGeminiApiKey() });
+      });
   }, []);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
@@ -319,23 +328,35 @@ export default function App() {
               </div>
 
               {file && !result && (
-                <button
-                  onClick={handleProcess}
-                  disabled={isProcessing}
-                  className="w-full mt-6 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 text-white font-medium py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-orange-200"
-                >
-                  {isProcessing ? (
-                    <>
-                      <RefreshCcw size={18} className="animate-spin" />
-                      Analyzing Text...
-                    </>
-                  ) : (
-                    <>
-                      Analyze with AI
-                      <ArrowRight size={18} />
-                    </>
+                <div className="space-y-4 mt-6">
+                  {!hasGeminiApiKey() && (
+                    <div className="p-4 bg-orange-50 border border-orange-200 rounded-xl text-orange-800 text-sm">
+                      <p className="font-bold flex items-center gap-2 mb-1">
+                        <AlertCircle size={16} /> Gemini API Key Missing
+                      </p>
+                      <p>To use this on Vercel, you must set <code className="bg-orange-100 px-1 rounded">VITE_GEMINI_API_KEY</code> in your environment variables.</p>
+                      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-orange-600 font-bold underline block mt-2">Get Free API Key here →</a>
+                    </div>
                   )}
-                </button>
+                  
+                  <button
+                    onClick={handleProcess}
+                    disabled={isProcessing || !hasGeminiApiKey()}
+                    className="w-full bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 text-white font-medium py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-orange-200"
+                  >
+                    {isProcessing ? (
+                      <>
+                        <RefreshCcw size={18} className="animate-spin" />
+                        Analyzing Text...
+                      </>
+                    ) : (
+                      <>
+                        Analyze with AI
+                        <ArrowRight size={18} />
+                      </>
+                    )}
+                  </button>
+                </div>
               )}
 
               {error && (

@@ -49,6 +49,8 @@ const getApiKey = () => {
   return browserKey || processKey || ""; 
 };
 
+export const hasGeminiApiKey = () => !!getApiKey();
+
 const ai = new GoogleGenAI({ 
   apiKey: getApiKey() 
 });
