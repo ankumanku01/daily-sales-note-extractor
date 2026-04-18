@@ -1,7 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
 
 const getEnv = (key: string) => {
-  return (import.meta as any).env[key] || (typeof process !== 'undefined' ? process.env[key] : undefined);
+  const envMap: Record<string, string> = {
+    'VITE_SUPABASE_URL': 'https://snnxbgvvfuceswacfptf.supabase.co',
+    'VITE_SUPABASE_ANON_KEY': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNubnhiZ3Z2ZnVjZXN3YWNmcHRmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY1MjE0NTQsImV4cCI6MjA5MjA5NzQ1NH0._E8RekbOGfFE3i0w0GD6WebS9G_kR7i9IVc3ISSseOQ'
+  };
+  return (import.meta as any).env[key] || (typeof process !== 'undefined' ? process.env[key] : undefined) || envMap[key];
 };
 
 const supabaseUrl = getEnv('VITE_SUPABASE_URL');

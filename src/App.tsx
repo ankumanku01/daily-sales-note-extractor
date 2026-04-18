@@ -690,39 +690,6 @@ export default function App() {
           </div>
         </div>
       </main>
-
-      {/* Setup Instructions Overlay (if env missing) */}
-      {(!process.env.GEMINI_API_KEY || (configStatus && !configStatus.hasAppsScript && (!configStatus.hasSheetsId || !configStatus.hasServiceAccount))) && (
-        <div className="fixed inset-0 bg-white/90 backdrop-blur-sm z-50 flex items-center justify-center p-6">
-          <div className="max-w-md bg-white rounded-3xl p-8 shadow-2xl border border-gray-100 text-center">
-            <div className="w-16 h-16 bg-red-50 text-red-500 rounded-2xl flex items-center justify-center mx-auto mb-6">
-              <AlertCircle size={32} />
-            </div>
-            <h2 className="text-2xl font-bold mb-2">Configuration Required</h2>
-            <div className="text-gray-500 mb-6 space-y-4 text-sm text-left">
-              {!process.env.GEMINI_API_KEY && (
-                <p>• Set <code className="bg-gray-100 px-1 rounded">GEMINI_API_KEY</code> in Secrets.</p>
-              )}
-              {configStatus && !configStatus.hasAppsScript && (
-                <div className="space-y-2">
-                  <p className="font-bold text-gray-700">To save to Sheets, you need EITHER:</p>
-                  <div className="pl-4 space-y-2">
-                    <p>1. <code className="bg-gray-100 px-1 rounded">GOOGLE_APPS_SCRIPT_URL</code> (Easiest! No Cloud Console needed)</p>
-                    <p className="text-xs text-gray-400">OR</p>
-                    <p>2. <code className="bg-gray-100 px-1 rounded">GOOGLE_SHEETS_ID</code> AND <code className="bg-gray-100 px-1 rounded">GOOGLE_SERVICE_ACCOUNT_KEY</code></p>
-                  </div>
-                </div>
-              )}
-            </div>
-            <button 
-              onClick={() => window.location.reload()}
-              className="w-full bg-black text-white py-3 rounded-xl font-medium hover:bg-gray-800 transition-colors"
-            >
-              I've updated the secrets
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

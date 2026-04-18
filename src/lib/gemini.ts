@@ -43,10 +43,13 @@ export interface ExtractionResult {
 }
 
 const getApiKey = () => {
+  // HARDCODE YOUR GEMINI API KEY HERE FOR VERCEL:
+  const HARDCODED_GEMINI_KEY = "AIzaSyDGvao3dbYxWTkM1tJ4-ipVegT56odcI2s"; 
+  
   const browserKey = (import.meta as any).env?.VITE_GEMINI_API_KEY;
   const processKey = typeof process !== 'undefined' ? process.env?.GEMINI_API_KEY : undefined;
-  // If user wants to hardcode for Vercel, they can replace the string below
-  return browserKey || processKey || ""; 
+  
+  return browserKey || processKey || HARDCODED_GEMINI_KEY; 
 };
 
 export const hasGeminiApiKey = () => !!getApiKey();
