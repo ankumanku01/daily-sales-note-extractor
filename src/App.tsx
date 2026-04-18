@@ -22,7 +22,9 @@ import { supabase, STORAGE_BUCKET, type EVSessionModel, type SalesRecordModel, t
 import * as pdfjsLib from 'pdfjs-dist';
 
 // pdfjs worker setup
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+// Using the version same as the library for consistency
+const PDFJS_VERSION = '4.0.379'; 
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.worker.min.mjs`;
 
 export default function App() {
   const [file, setFile] = useState<{ data: string; type: string; name: string } | null>(null);
@@ -39,22 +41,31 @@ export default function App() {
   const [bulkRates, setBulkRates] = useState('');
   const [editingRateId, setEditingRateId] = useState<string | null>(null);
   const [isBulkMode, setIsBulkMode] = useState(false);
+  const [showSetupWarning, setShowSetupWarning] = useState(false);
 
   React.useEffect(() => {
-    fetchRates();
-    fetch('/api/config-status')
-      .then(async res => {
+    const checkSetup = async () => {
+      await fetchRates();
+      try {
+        const res = await fetch('/api/config-status');
         const contentType = res.headers.get("content-type");
+        let status;
         if (contentType && contentType.indexOf("application/json") !== -1) {
-          return res.json();
+          status = await res.json();
+        } else {
+          status = { hasSheetsId: false, hasServiceAccount: false, hasAppsScript: false, hasGeminiKey: hasGeminiApiKey() };
         }
-        return { hasSheetsId: false, hasServiceAccount: false, hasAppsScript: false, hasGeminiKey: hasGeminiApiKey() };
-      })
-      .then(setConfigStatus)
-      .catch((err) => {
-        console.warn('Backend not detected, running in client-mode:', err);
-        setConfigStatus({ hasSheetsId: false, hasServiceAccount: false, hasAppsScript: false, hasGeminiKey: hasGeminiApiKey() });
-      });
+        setConfigStatus(status);
+        if (!status.hasGeminiKey) setShowSetupWarning(true);
+      } catch (err) {
+        console.warn('Backend setup check failed:', err);
+        const status = { hasSheetsId: false, hasServiceAccount: false, hasAppsScript: false, hasGeminiKey: hasGeminiApiKey() };
+        setConfigStatus(status);
+        if (!status.hasGeminiKey) setShowSetupWarning(true);
+      }
+    };
+    
+    checkSetup();
   }, []);
 
   const fetchRates = async () => {
@@ -276,12 +287,24 @@ export default function App() {
 
   const handleProcess = async () => {
     if (!file) return;
+    
+    // Fail fast if key is missing
+    if (!hasGeminiApiKey()) {
+      setError('Gemini API Key is missing. Please go to the Gear Icon (top right) -> Secrets -> Add a secret named GEMINI_API_KEY with your key from aistudio.google.com/app/apikey');
+      return;
+    }
+
     setIsProcessing(true);
     setError(null);
     try {
-      // 1. Upload file to bucket
-      const fileUrl = await uploadFileToSupabase();
-      if (fileUrl) setUploadStatus({ success: true, url: fileUrl });
+    // 1. Upload file to bucket
+    const fileUrl = await uploadFileToSupabase();
+    if (fileUrl) {
+      setUploadStatus({ success: true, url: fileUrl });
+    } else {
+      // If upload fails, we can still try to analyze, but warn the user or log it
+      console.warn('Storage upload failed, proceeding with direct analysis.');
+    }
 
       // 2. Run Gemini Extraction
       const optimizedData = await compressImage(file.data);
@@ -374,20 +397,46 @@ export default function App() {
 
   const toggleUncertainty = (index: number) => {
     if (!result) return;
-    const newExpenses = [...result.expenses];
-    newExpenses[index].uncertain = !newExpenses[index].uncertain;
-    setResult({ ...result, expenses: newExpenses });
+    const newEntries = [...result.entries];
+    (newEntries[index] as any).uncertain = !(newEntries[index] as any).uncertain;
+    setResult({ ...result, entries: newEntries });
   };
 
   const updateCategory = (index: number, newCategory: string) => {
     if (!result) return;
-    const newExpenses = [...result.expenses];
-    newExpenses[index].category = newCategory;
-    setResult({ ...result, expenses: newExpenses });
+    const newEntries = [...result.entries];
+    (newEntries[index] as any).category = newCategory;
+    setResult({ ...result, entries: newEntries });
   };
 
   return (
     <div className="min-h-screen bg-[#F5F5F5] text-[#1A1A1A] font-sans selection:bg-orange-100">
+      {/* Setup Warning */}
+      <AnimatePresence>
+        {showSetupWarning && (
+          <motion.div 
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            className="bg-orange-500 overflow-hidden"
+          >
+            <div className="max-w-5xl mx-auto px-6 py-2 flex items-center justify-between text-white text-xs font-medium">
+              <div className="flex items-center gap-2">
+                <AlertCircle size={14} />
+                <span>Gemini API Key is missing. AI analysis will not work until you add it.</span>
+              </div>
+              <button 
+                onClick={() => {
+                  window.alert("Go to the Gear Icon (top right) -> Secrets -> Add a secret named GEMINI_API_KEY");
+                }}
+                className="bg-white/20 hover:bg-white/30 px-3 py-1 rounded-lg transition-colors flex items-center gap-1"
+              >
+                How to fix <ChevronRight size={12} />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
         <div className="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">

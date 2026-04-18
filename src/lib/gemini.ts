@@ -44,11 +44,22 @@ export interface ExtractionResult {
 
 const getApiKey = () => {
   // Access key securely from environment variables.
-  // In this environment, use GEMINI_API_KEY. On Vercel, use VITE_GEMINI_API_KEY.
-  return process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY;
+  const browserKey = (import.meta as any).env?.VITE_GEMINI_API_KEY;
+  const processKey = typeof process !== 'undefined' ? process.env?.GEMINI_API_KEY : undefined;
+  
+  const key = processKey || browserKey;
+  
+  if (!key) {
+    console.error("CRITICAL: GEMINI_API_KEY is not defined in Secrets or Environment Variables.");
+  }
+  
+  return key;
 };
 
-export const hasGeminiApiKey = () => !!getApiKey();
+export const hasGeminiApiKey = () => {
+  const key = getApiKey();
+  return !!key && key.length > 5; // Basic sanity check
+};
 
 const ai = new GoogleGenAI({ 
   apiKey: getApiKey() 
